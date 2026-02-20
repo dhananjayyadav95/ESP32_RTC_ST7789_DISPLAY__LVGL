@@ -780,7 +780,7 @@
 
 #define LV_USE_BUTTONMATRIX  1
 
-#define LV_USE_CALENDAR   1
+#define LV_USE_CALENDAR   0
 #if LV_USE_CALENDAR
     #define LV_CALENDAR_WEEK_STARTS_MONDAY 0
     #if LV_CALENDAR_WEEK_STARTS_MONDAY
@@ -1449,10 +1449,10 @@
 *======================*/
 
 /** Enable examples to be built with the library. */
-#define LV_BUILD_EXAMPLES 1
+#define LV_BUILD_EXAMPLES 0
 
 /** Build the demos */
-#define LV_BUILD_DEMOS 1
+#define LV_BUILD_DEMOS 0
 
 /*===================
  * DEMO USAGE
