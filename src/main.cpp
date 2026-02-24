@@ -2,8 +2,12 @@
 
 #include <Arduino.h>
 #include <lvgl.h>
-#include "ui.h"
-#include "screens.h"
+#include <stdio.h>
+
+#include "page_manager.h"
+#include "page_clock.h"
+#include "page_calendar.h"
+#include "page_stopwatch.h"
 
 // DS1302 via "Rtc by Makuna" library
 #include <ThreeWire.h>
@@ -26,7 +30,7 @@ uint32_t lv_tick()
     return millis();
 }
 
-void initDisplay(int w = 240, int h = 320, int buf = 50)
+void initDisplay(int w = 240, int h = 320, int buf = 80)
 {
     width = w;
     height = h;
@@ -44,7 +48,7 @@ void initDisplay(int w = 240, int h = 320, int buf = 50)
 // ── Pin definitions ──────────────────────────────────────────────────────────
 #define BTN_PREV 39   // Previous month button GPIO
 #define BTN_NEXT 35   // Next month button GPIO
-#define BTN_SELECT 34 // Select / OK button GPIO
+#define BTN_ACTION 34 // Select / OK button GPIO
 
 #define RTC_CE 33
 #define RTC_SCK 26
@@ -68,84 +72,92 @@ TFT_eSPI tft;
 static lv_display_t *display;
 static lv_color_t buf1[240 * 10];
 
-// ── Button state tracking ───────────────────────────────────────────────────
-static unsigned long lastPressTime[3] = {0, 0, 0};
+static uint32_t lv_tick_cb() { return (uint32_t)millis(); }
 
-/**
- * Read a button with debounce.
- * Returns true on the falling edge (press), false otherwise.
- * index: 0 = PREV, 1 = NEXT, 2 = SELECT
- */
-bool buttonPressed(uint8_t pin, uint8_t index)
+
+
+struct Btn
 {
-    if (digitalRead(pin) == LOW)
+    uint8_t pin;
+    bool last;
+    unsigned long lastTime;
+};
+
+static Btn btns[3] = {
+    {BTN_PREV, HIGH, 0},
+    {BTN_NEXT, HIGH, 0},
+    {BTN_ACTION, HIGH, 0},
+};
+
+// Returns true exactly once on each press
+static bool btnFired(Btn &b)
+{
+    bool cur = digitalRead(b.pin);
+    if (cur == LOW && b.last == HIGH)
     {
         unsigned long now = millis();
-        if (now - lastPressTime[index] > DEBOUNCE_MS)
+        if (now - b.lastTime > DEBOUNCE_MS)
         {
-            lastPressTime[index] = now;
+            b.lastTime = now;
+            b.last = cur;
             return true;
         }
     }
+    b.last = cur;
     return false;
 }
 
 // ============================================================
 //  RTC sync  — reads DS1302, pushes date to LVGL calendar
 // ============================================================
-void syncRtcToCalendar()
+
+// ── RTC helpers ──────────────────────────────────────────────
+static void setRtcTime()
+{
+    // Compile-time sync — uncomment call in setup() once, then comment back
+    RtcDateTime t(__DATE__, __TIME__);
+    Rtc.SetDateTime(RtcDateTime(t.Epoch32Time() + 10)); // +10s for upload delay
+    Serial.println("[RTC] Time SET from compile time.");
+}
+
+static void syncRtc()
 {
     if (!Rtc.IsDateTimeValid())
     {
-        Serial.println("[RTC] Date/time not valid! Check battery or run setRtcTime().");
+        Serial.println("[RTC] Invalid — uncomment setRtcTime() in setup()");
         return;
     }
-    RtcDateTime now = Rtc.GetDateTime();
+    RtcDateTime t = Rtc.GetDateTime();
     Serial.printf("[RTC] %04u-%02u-%02u  %02u:%02u:%02u\n",
-                  now.Year(), now.Month(), now.Day(),
-                  now.Hour(), now.Minute(), now.Second());
-
-    calendar_set_today(now.Year(), now.Month(), now.Day());
-}
-
-// ============================================================
-//  Call this ONCE to program the DS1302 (new module / flat battery).
-//  1. Edit the date/time below.
-//  2. Uncomment the call in setup().
-//  3. Upload, run once, then comment it out and re-upload.
-// ============================================================
-void setRtcTime()
-{
-    //                           YYYY   MM  DD  HH  MM  SS
-    RtcDateTime compiled(__DATE__, __TIME__);
-    Rtc.SetDateTime(compiled);
-    Serial.println("[RTC] Time has been SET.");
+                  t.Year(), t.Month(), t.Day(),
+                  t.Hour(), t.Minute(), t.Second());
+    page_calendar_set_today(t.Year(), t.Month(), t.Day());
 }
 
 // ── Setup ───────────────────────────────────────────────────────────────────
 void setup()
 {
     Serial.begin(115200);
+    Serial.println("\n=== ESP32 Smart Clock ===");
 
     // Button pins – INPUT_PULLUP so pressing pulls to GND (active LOW)
     // NOTE: GPIO 34 & 35 on ESP32 are input-only (no internal pull-up).
     //       Add a 10kΩ external pull-up resistor to 3.3V on those pins.
     pinMode(BTN_PREV, INPUT_PULLUP);
     pinMode(BTN_NEXT, INPUT);   // External pull-up required
-    pinMode(BTN_SELECT, INPUT); // External pull-up required
+    pinMode(BTN_ACTION, INPUT); // External pull-up required
 
     // ── DS1302 ──────────────────────────────────────────────
     Rtc.Begin();
 
-    // ▼ Uncomment ONCE to set time, then comment out again:
-    setRtcTime();
-
-    if (!Rtc.GetIsRunning())
-    {
-        Serial.println("[RTC] Was stopped – starting now.");
-        Rtc.SetIsRunning(true);
-    }
     Rtc.SetIsWriteProtected(false);
+    if (!Rtc.GetIsRunning())
+        Rtc.SetIsRunning(true);
+
+    // ▼ Uncomment ONCE to set time, then comment out again:
+    // setRtcTime();
+
+    // ── Display ──────────────────────────────────────────────
 
     initDisplay(240, 320, 50);
     screen_backlite(true); // Turn on backlight
@@ -163,14 +175,22 @@ void setup()
     }
 
     // Build the calendar UI
-    ui_init(); // calls create_screens() internally
+    // ui_init(); // calls create_screens() internally
+
+    // Build all pages
+    page_manager_init();
+    syncRtc();
+
+    Serial.println("[APP] Ready.");
+
+    // syncRtcToCalendar();
 }
 
-static unsigned long lastRtcPoll = 0;
-// ── Clock label update (every second) ───────────────────────
-static unsigned long lastClockUpdate = 0;
-
 // ── Loop ────────────────────────────────────────────────────────────────────
+
+static unsigned long lastRtcPoll = 0;
+static unsigned long lastClockUpd = 0;
+
 void loop()
 {
     lv_timer_handler(); // Let LVGL do its work
@@ -178,70 +198,33 @@ void loop()
     // Update time label every second
     unsigned long now = millis();
 
-    // inside loop():
-    if (now - lastClockUpdate >= 1000)
+    // Clock label — update every second
+    if (now - lastClockUpd >= 1000)
     {
-        lastClockUpdate = now;
+        lastClockUpd = now;
         if (Rtc.IsDateTimeValid())
         {
             RtcDateTime t = Rtc.GetDateTime();
-
-            // Time
-            if (g_time_label != NULL)
-            {
-                char timeBuf[12];
-                snprintf(timeBuf, sizeof(timeBuf), "%02u:%02u:%02u",
-                         t.Hour(), t.Minute(), t.Second());
-                lv_label_set_text(g_time_label, timeBuf);
-            }
-
-            // Date  e.g.  Mon, 24 Feb 2026
-            if (g_date_label != NULL)
-            {
-                const char *days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-                const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                                        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-                char dateBuf[32];
-                snprintf(dateBuf, sizeof(dateBuf), "%s, %02u %s %04u",
-                         days[t.DayOfWeek()],
-                         t.Day(),
-                         months[t.Month() - 1],
-                         t.Year());
-                lv_label_set_text(g_date_label, dateBuf);
-            }
+            page_clock_update(t.Hour(), t.Minute(), t.Second(),
+                              t.Day(), t.Month(), t.Year(), t.DayOfWeek());
         }
     }
 
-    // Poll RTC every 10 seconds (10000 ms)
-    if (now - lastRtcPoll >= RTC_POLL_MS)
+    // Stopwatch — update every loop tick
+    page_stopwatch_update();
+
+    // RTC → Calendar sync every 60s (catches midnight date change)
+    if (now - lastRtcPoll >= 60000UL)
     {
         lastRtcPoll = now;
-        syncRtcToCalendar();
+        syncRtc();
     }
 
-    // ── Previous month button ──────────────────────────────────────────────
-    if (buttonPressed(BTN_PREV, 0))
-    {
-        Serial.println("BTN_PREV pressed → previous month");
-        calendar_prev_month();
-    }
-
-    // ── Next month button ──────────────────────────────────────────────────
-    if (buttonPressed(BTN_NEXT, 1))
-    {
-        Serial.println("BTN_NEXT pressed → next month");
-        calendar_next_month();
-    }
-
-    // ── Select / OK button ────────────────────────────────────────────────
-    if (buttonPressed(BTN_SELECT, 2))
-    {
-        Serial.println("BTN_SELECT pressed → select today");
-        calendar_goto_today();
-        // Add your own selection logic here, e.g. read the focused date:
-        // lv_calendar_date_t d;
-        // if (lv_calendar_get_pressed_date(g_calendar, &d)) { ... }
-    }
-
-    delay(5); // ~200 Hz loop, plenty for button polling
+    // ── Buttons ──────────────────────────────────────────────
+    if (btnFired(btns[0]))
+        page_handle_prev_btn(); // PREV
+    if (btnFired(btns[1]))
+        page_next(); // NEXT — always page cycle
+    if (btnFired(btns[2]))
+        page_handle_action_btn(); // ACTION
 }

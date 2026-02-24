@@ -203,3 +203,4 @@ extern uint16_t  g_today_year;
 extern uint8_t   g_today_month;
 extern uint8_t   g_today_day;
 ```
+Video demo: <video src="Media\calender working video.mp4" controls></video>
